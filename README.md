@@ -23,6 +23,8 @@ CPU clock is 8 MHz.
 
 - Execute IR_init(uint16_t clearBufferTime) function to set registers, interrupts and clearBufferTime (after this time, durationBuffer will be cleared). It is useful, when some parts of running program cause delay. The clearBufferTime should be set the same as the duration of the delay. If nothing causes delay, just write 0.
 
+- Repetition for certain commands can be disabled using IR_disableRepetition(uint8_t command). For each command one IR_disableRepetition(uint8_t command) execution is needed. So while holding a button, your instructions related to the command are executed just once (IR_available() returns false).
+
 - Then just check IR_available() function in loop.
 
 - If IR_available() returns true, IR signal has been checked succesfully and then IR data (address and command) are available.
