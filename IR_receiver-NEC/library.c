@@ -43,6 +43,8 @@
 #define BUFFER_SIZE 64
 
 IR_data IR;
+static uint8_t numOfcmds = 0;
+static uint8_t *cmdsPtr = NULL;
 static uint16_t timeRange = TICK * NUM_OF_TICKS;
 static uint16_t clearBTime = 0;
 static volatile bool durationBuffer[BUFFER_SIZE];	// LOGIC_SHORT -> true, LOGIC_LONG -> false
@@ -54,6 +56,7 @@ static volatile uint8_t state = SLEEP_STATE;
 static volatile uint16_t ovfCounter = 1;
 static volatile bool available = false;
 
+static bool isRepDisabled(uint8_t command);
 static void writeBit(uint8_t i, uint8_t j, uint8_t *data);
 static void setSleepState();
 
@@ -106,6 +109,18 @@ void IR_init(uint16_t clearBufferTime)
 	}
 }
 
+// Disables repetition of the entered command (while holding a button, your instructions related to the command are executed just once)
+void IR_disableRepetition(uint8_t command)
+{
+	numOfcmds++;
+	// Dynamic memory allocation
+	cmdsPtr = realloc(cmdsPtr, sizeof(*cmdsPtr) * numOfcmds);
+	if (cmdsPtr != NULL)
+	{
+		*(cmdsPtr + (numOfcmds-1)) = command;
+	}
+}
+
 // Returns true if receiving IR (initial pulses or repeat pulses)
 bool IR_available()
 {
@@ -124,51 +139,84 @@ bool IR_available()
 	// Checking the buffer
 	if (bufferReady)
 	{
-		available = true;
-		
-		for (uint8_t i = 0; i < 4; i++)
+		if (!available)
 		{
-			for (uint8_t j = i * 16 + 1; j < i * 16 + 16; j += 2)
+			available = true;
+			
+			for (uint8_t i = 0; i < 4; i++)
 			{
-				switch (i)
+				for (uint8_t j = i * 16 + 1; j < i * 16 + 16; j += 2)
 				{
-					case 0:
+					switch (i)
+					{
+						case 0:
 						writeBit(i, j, &address);
 						break;
-					
-					case 1:
+						
+						case 1:
 						writeBit(i, j, &invertedAddress);
 						break;
-					
-					case 2:
+						
+						case 2:
 						writeBit(i, j, &command);
 						break;
-					
-					case 3:
+						
+						case 3:
 						writeBit(i, j, &invertedCommand);
 						break;
+					}
 				}
 			}
+			
+			// Checks whether invertedAddress is really inverted address
+			if ((address ^ invertedAddress) != 0xFF)
+			{
+				setSleepState();
+			}
+			// Checks whether invertedCommand is really inverted command
+			if ((command ^ invertedCommand) != 0xFF)
+			{
+				setSleepState();
+			}
+			
+			IR.address = address;	// Assigning address to structure's address member
+			IR.command = command;	// Assigning command to structure's command member
+			
+			bufferReady = false;
 		}
-		
-		// Checks whether invertedAddress is really inverted address
-		if ((address ^ invertedAddress) != 0xFF)
+		// Checks whether repetition is disabled
+		else if (available && isRepDisabled(IR.command))
 		{
-			setSleepState();
+			bufferReady = false;
+			return false;
 		}
-		// Checks whether invertedCommand is really inverted command
-		if ((command ^ invertedCommand) != 0xFF)
+		// Repetition is allowed
+		else
 		{
-			setSleepState();
+			bufferReady = false;
 		}
-		
-		IR.address = address;	// Assigning address to structure's address member
-		IR.command = command;	// Assigning command to structure's command member
-		
-		bufferReady = false;
+	}
+	// Checks whether repetition is disabled
+	else if (available && isRepDisabled(IR.command))
+	{
+		return false;
 	}
 	
 	return available;
+}
+
+// Checks whether repetition is disabled
+static bool isRepDisabled(uint8_t command)
+{
+	// Iterates through whole dynamically allocated memory
+	for (uint8_t i = 0; i < numOfcmds; i++)
+	{
+		if (*(cmdsPtr + i) == command)
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 static void writeBit(uint8_t i, uint8_t j, uint8_t *data)
