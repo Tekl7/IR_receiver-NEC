@@ -112,12 +112,60 @@ void IR_init(uint16_t clearBufferTime)
 // Disables repetition of the entered command (while holding a button, your instructions related to the command are executed just once)
 void IR_disableRepetition(uint8_t command)
 {
-	numOfcmds++;
-	// Dynamic memory allocation
-	cmdsPtr = realloc(cmdsPtr, sizeof(*cmdsPtr) * numOfcmds);
-	if (cmdsPtr != NULL)
+	if(!isRepDisabled(command))
+		{
+		numOfcmds++;
+		// Dynamic memory allocation
+		cmdsPtr = realloc(cmdsPtr, sizeof(*cmdsPtr) * numOfcmds);
+		if (cmdsPtr != NULL)
+		{
+			*(cmdsPtr + (numOfcmds-1)) = command;
+		}
+	}
+}
+
+// Enables repetition of the entered command, which were disabled earlier
+void IR_enableRepetition(uint8_t command)
+{
+	// Iterates through whole dynamically allocated memory
+	for (uint8_t i = 0; i < numOfcmds; i++)
 	{
-		*(cmdsPtr + (numOfcmds-1)) = command;
+		if (*(cmdsPtr + i) == command)
+		{
+			// Copy all commands
+			uint8_t *tempCmdsPtr = calloc(numOfcmds, sizeof(*cmdsPtr));
+			if (tempCmdsPtr != NULL)
+			{
+				for (uint8_t j = 0; j < numOfcmds; j++)
+				{
+					*(tempCmdsPtr + j) = *(cmdsPtr + j);
+				}
+				
+				// Free commands memory
+				free(cmdsPtr);
+				
+				// Copy back all commands except the deleted one
+				numOfcmds--;
+				cmdsPtr = calloc(numOfcmds, sizeof(*cmdsPtr));
+				if (cmdsPtr != NULL)
+				{
+					uint8_t k = 0;
+					for (uint8_t j = 0; j < numOfcmds + 1; j++)
+					{
+						if (*(tempCmdsPtr + j) != command)
+						{
+							*(cmdsPtr + k) = *(tempCmdsPtr + j);
+							k++;
+						}
+					}
+				}
+				
+				// Free temporary commands memory
+				free(tempCmdsPtr);
+			}
+			
+			break;
+		}
 	}
 }
 
@@ -125,6 +173,8 @@ void IR_disableRepetition(uint8_t command)
 bool IR_available()
 {
 	uint8_t address = 0, invertedAddress = 0, command = 0, invertedCommand = 0;
+	static uint8_t lastCommand = 0;
+	static bool lastAvailable = false;
 	
 	// Clearing the buffer
 	if (clearBuffer)
@@ -139,53 +189,49 @@ bool IR_available()
 	// Checking the buffer
 	if (bufferReady)
 	{
-		if (!available)
-		{
-			available = true;
+		available = true;
 			
-			for (uint8_t i = 0; i < 4; i++)
+		for (uint8_t i = 0; i < 4; i++)
+		{
+			for (uint8_t j = i * 16 + 1; j < i * 16 + 16; j += 2)
 			{
-				for (uint8_t j = i * 16 + 1; j < i * 16 + 16; j += 2)
+				switch (i)
 				{
-					switch (i)
-					{
-						case 0:
-						writeBit(i, j, &address);
-						break;
+					case 0:
+					writeBit(i, j, &address);
+					break;
 						
-						case 1:
-						writeBit(i, j, &invertedAddress);
-						break;
+					case 1:
+					writeBit(i, j, &invertedAddress);
+					break;
 						
-						case 2:
-						writeBit(i, j, &command);
-						break;
+					case 2:
+					writeBit(i, j, &command);
+					break;
 						
-						case 3:
-						writeBit(i, j, &invertedCommand);
-						break;
-					}
+					case 3:
+					writeBit(i, j, &invertedCommand);
+					break;
 				}
 			}
-			
-			// Checks whether invertedAddress is really inverted address
-			if ((address ^ invertedAddress) != 0xFF)
-			{
-				setSleepState();
-			}
-			// Checks whether invertedCommand is really inverted command
-			if ((command ^ invertedCommand) != 0xFF)
-			{
-				setSleepState();
-			}
-			
-			IR.address = address;	// Assigning address to structure's address member
-			IR.command = command;	// Assigning command to structure's command member
-			
-			bufferReady = false;
 		}
+			
+		// Checks whether invertedAddress is really inverted address
+		if ((address ^ invertedAddress) != 0xFF)
+		{
+			setSleepState();
+		}
+		// Checks whether invertedCommand is really inverted command
+		if ((command ^ invertedCommand) != 0xFF)
+		{
+			setSleepState();
+		}
+			
+		IR.address = address;	// Assigning address to structure's address member
+		IR.command = command;	// Assigning command to structure's command member
+		
 		// Checks whether repetition is disabled
-		else if (available && isRepDisabled(IR.command))
+		if (IR.command == lastCommand && lastAvailable == true && isRepDisabled(IR.command))
 		{
 			bufferReady = false;
 			return false;
@@ -193,6 +239,7 @@ bool IR_available()
 		// Repetition is allowed
 		else
 		{
+			lastCommand = IR.command;
 			bufferReady = false;
 		}
 	}
@@ -202,6 +249,7 @@ bool IR_available()
 		return false;
 	}
 	
+	lastAvailable = available;
 	return available;
 }
 

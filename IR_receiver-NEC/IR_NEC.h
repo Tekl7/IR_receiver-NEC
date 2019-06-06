@@ -17,6 +17,7 @@
  * Repetition for certain commands can be disabled using IR_disableRepetition(uint8_t command).
  * For each command one IR_disableRepetition(uint8_t command) execution is needed.
  * So while holding a button, your instructions related to the command are executed just once (IR_available() returns false).
+ * Disabled repetition can be enabled using IR_enableRepetition(uint8_t command) again.
  * Then just check IR_available() function in loop.
  * If IR_available() returns true, IR signal has been checked succesfully and then IR data (address and command) are available.
  * Access to IR data is through IR_data structure named IR (IR.address for address, IR.command for command).
@@ -48,6 +49,7 @@ extern IR_data IR;
 
 void IR_init(uint16_t clearBufferTime);
 void IR_disableRepetition(uint8_t command);
+void IR_enableRepetition(uint8_t command);
 bool IR_available();
 
 #endif /* IR_NEC_H_ */
