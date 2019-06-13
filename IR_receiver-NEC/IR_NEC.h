@@ -32,11 +32,7 @@
 #define F_CPU 8000000UL
 #endif
 
-#include <avr/io.h>
-#include <avr/interrupt.h>
-#include <avr/sfr_defs.h>
 #include <stdbool.h>
-#include <stdlib.h>
 
 // Structure for address and command
 typedef struct

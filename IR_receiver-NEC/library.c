@@ -5,6 +5,11 @@
  * Author : Vojta
  */ 
 
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <avr/sfr_defs.h>
+#include <stdlib.h>
+
 #include "IR_NEC.h"
 
 // Choose a number and assign it to DEVICE macro to select the demanded device.
