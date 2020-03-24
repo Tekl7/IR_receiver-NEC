@@ -2,7 +2,7 @@
  * IR_NEC.h
  *
  * Created: 12. 4. 2019 10:02:55
- *  Author: Vojta
+ *  Author: Tekl7
  *
  * This project uses Timer/Counter and External interrupt to decode IR NEC protocol.
  *
@@ -11,9 +11,9 @@
  * ATtiny88: 8-bit Timer/Counter0, INT0
  * CPU clock is 8 MHz.
  *
- * Connect output pin of IR receiver to PB2/PD2 (pin 7/4).
+ * Connect output pin of IR receiver to PB2/PD2 (pin 7 (t85)/pin 4 (t88)).
  * Execute IR_init(uint16_t clearBufferTime) function to set registers, interrupts and clearBufferTime (after this time, durationBuffer will be cleared).
- * It is useful, when some parts of running program cause delay. The clearBufferTime should be set the same as the duration of the delay.
+ * The clearBufferTime is useful, when some parts of running program cause delay. Its value should be set the same as the duration of the delay.
  * Repetition for certain commands can be disabled using IR_disableRepetition(uint8_t command).
  * For each command one IR_disableRepetition(uint8_t command) execution is needed.
  * So while holding a button, your instructions related to the command are executed just once (IR_available() returns false).
@@ -33,6 +33,11 @@
 #endif
 
 #include <stdbool.h>
+
+// Choose a number and assign it to DEVICE macro to select the demanded device.
+// ATtiny85 -> 0
+// ATtiny88 -> 1
+#define DEVICE 0
 
 // Structure for address and command
 typedef struct
