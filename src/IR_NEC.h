@@ -11,9 +11,10 @@
  * ATtiny88: 8-bit Timer/Counter0, INT0
  * CPU clock is 8 MHz.
  *
- * Connect output pin of IR receiver to PB2/PD2 (pin 7 (t85)/pin 4 (t88)).
+ * Connect output pin of IR receiver to PB2->ATtiny85 / PD2->ATtiny88 (pin 7/4).
  * Execute IR_init(uint16_t clearBufferTime) function to set registers, interrupts and clearBufferTime (after this time, durationBuffer will be cleared).
  * The clearBufferTime is useful, when some parts of running program cause delay. Its value should be set the same as the duration of the delay.
+ * If nothing causes delay, just write 0.
  * Repetition for certain commands can be disabled using IR_disableRepetition(uint8_t command).
  * For each command one IR_disableRepetition(uint8_t command) execution is needed.
  * So while holding a button, your instructions related to the command are executed just once (IR_available() returns false).
