@@ -1,3 +1,4 @@
-﻿*.cproj
+*.cproj
 Debug/
 Release/
+IR_receiver-NEC.componentinfo.xml
