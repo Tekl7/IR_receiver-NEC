@@ -14,7 +14,7 @@
 #include "IR_NEC.h"
 
 // Times in µs
-#define LEADING_PULSE 9000
+#define LEADING_PULSE 9200
 #define INITIAL_SPACE 4500
 #define REPEAT_SPACE 2250
 #define FINAL_PULSE 563	// 562.5
