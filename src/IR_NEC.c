@@ -8,68 +8,146 @@
 
 #include <avr/io.h>
 #include <avr/interrupt.h>
+#include <avr/portpins.h>
 #include <avr/sfr_defs.h>
 #include <stdlib.h>
 
 #include "IR_NEC.h"
 
-// Times in 탎
-#define LEADING_PULSE 9200
-#define INITIAL_SPACE 4500
-#define REPEAT_SPACE 2250
-#define FINAL_PULSE 563	// 562.5
-#define LOGIC_SHORT 563	// 562.5
-#define LOGIC_LONG 1688	// 1687.5
+// Set IR receive pin
+#if defined(__AVR_ATtiny85__)
+#define IR_RCV_PIN		PB2
+#define IR_RCV_PIN_REG	PINB
+#elif defined(__AVR_ATtiny88__)
+#define IR_RCV_PIN		PD2
+#define IR_RCV_PIN_REG	PIND
+#endif
 
-// One tick duration in 탎
+// Duration of one timer tick in 탎
 #define TICK 128
-#define NUM_OF_TICKS 3
 
-// States
-#define SLEEP_STATE 0
-#define LEADING_PULSE_STATE 1
-#define LEADING_SPACE_STATE 2
-#define ADDRESS_STATE 3
-#define INVERTED_ADDRESS_STATE 4
-#define COMMAND_STATE 5
-#define INVERTED_COMMAND_STATE 6
-#define FINAL_PULSE_STATE 7
-#define WAIT_STATE 8
+// Number of elements in the pulseBuffer
+#define BUFFER_SIZE 32
 
-// Number of OVFs to SLEEP_STATE or clear buffer
-#define NUM_OF_OVFS 3
-#define NUM_OF_CLEAR_BUFFER_OVFS(clearBufferTime) (clearBufferTime + 16) / (1UL * 1000UL * 256UL * 1024UL / F_CPU)
-
-// Number of elements in the durationBuffer
-#define BUFFER_SIZE 64
-
-IR_data IR;
-static uint8_t numOfcmds = 0;
-static uint8_t *cmdsPtr = NULL;
-static uint16_t timeRange = TICK * NUM_OF_TICKS;
-static uint16_t clearBTime = 0;
-static volatile bool durationBuffer[BUFFER_SIZE];	// LOGIC_SHORT -> true, LOGIC_LONG -> false
-static volatile uint8_t bufferIndex = 0;
-static volatile bool bufferReady = false;
-static volatile bool clearBuffer = false;
-static volatile bool level = true;					// Pulse -> level = true, space -> level = false
-static volatile uint8_t state = SLEEP_STATE;
-static volatile uint16_t ovfCounter = 1;
-static volatile bool available = false;
-
-static bool isRepDisabled(uint8_t command);
-static void writeBit(uint8_t i, uint8_t j, uint8_t *data);
-static void setSleepState();
-
-void IR_init(uint16_t clearBufferTime)
+enum PulseType
 {
-	#if DEVICE == 0
-	// Normal mode
-	// Prescaler 1024
-	TCCR0B |= _BV(CS02) | _BV(CS00);
+	LEADING_PULSE = 0,
+	INITIAL_SPACE,
+	REPEAT_SPACE,
+	FINAL_PULSE,
+	LOGIC_SHORT,
+	LOGIC_LONG,
 	
-	// Overflow interrupt for Timer/Counter0 enabled
-	TIMSK |= _BV(TOIE0);
+	PULSE_COUNT
+};
+
+typedef enum
+{
+	WAIT_STATE,
+	LEADING_PULSE_STATE,
+	LEADING_SPACE_STATE,
+	DATA_STATE,
+	FINAL_PULSE_STATE
+} IRCaptureState;
+
+typedef enum
+{
+	// Newly captured IR data in pulse buffer
+	BUF_READY,
+	// Capturing IR repeat code (IR data still captured in pulse buffer)
+	BUF_REPEAT,
+	/*
+		Nothing is happening (timeout) /
+		receiving error /
+		only if disabled repetition: pulse buffer already processed in IR_data_ready() function
+	*/
+	BUF_NOT_READY
+} PulseBufferState;
+
+/*
+	// Pulse tolerance multiplier - used to calculate pulse thresholds
+	#define PULSE_TOLERANCE_MULT	1.3
+
+	// In 탎
+	enum PulseDuration
+	{
+		LEADING_PULSE_DUR = 9500,
+		INITIAL_SPACE_DUR = 4500,
+		REPEAT_SPACE_DUR = 2250,
+		FINAL_PULSE_DUR = 540,
+		LOGIC_SHORT_DUR = 540,
+		LOGIC_LONG_DUR = 1688
+	};
+*/
+
+// Lower thresholds of pulse duration
+static /* const */ uint16_t lowPulseThrs[PULSE_COUNT] =
+{
+	6650,	// LEADING_PULSE_DUR * (2 - PULSE_TOLERANCE_MULT)
+	3150,	// INITIAL_SPACE_DUR * (2 - PULSE_TOLERANCE_MULT)
+	1575,	// REPEAT_SPACE_DUR * (2 - PULSE_TOLERANCE_MULT)
+	378,	// FINAL_PULSE_DUR * (2 - PULSE_TOLERANCE_MULT)
+	378,	// LOGIC_SHORT_DUR * (2 - PULSE_TOLERANCE_MULT)
+	1181	// LOGIC_LONG_DUR * (2 - PULSE_TOLERANCE_MULT)
+};
+
+// Upper thresholds of pulse duration
+static /* const */ uint16_t upPulseThrs[PULSE_COUNT] =
+{
+	12350,	// LEADING_PULSE_DUR * PULSE_TOLERANCE_MULT
+	5850,	// INITIAL_SPACE_DUR * PULSE_TOLERANCE_MULT
+	2925,	// REPEAT_SPACE_DUR * PULSE_TOLERANCE_MULT
+	702,	// FINAL_PULSE_DUR * PULSE_TOLERANCE_MULT
+	702,	// LOGIC_SHORT_DUR * PULSE_TOLERANCE_MULT
+	2194	// LOGIC_LONG_DUR * PULSE_TOLERANCE_MULT
+};
+
+// Main variable that stores IR data (address and command)
+IR_data IR;
+// Number of overflows to timeout
+static uint8_t ovfsTimeout;
+// Number of commands with disabled repetition
+static uint8_t repDisCmdsCount = 0;
+// Pointer to commands with disabled repetition
+static uint8_t *repDisCmds = NULL;
+// Stores captured data; LOGIC_SHORT -> false, LOGIC_LONG -> true
+static volatile bool pulseBuffer[BUFFER_SIZE];
+// Pulse buffer index (changes from 0 to BUFFER_SIZE)
+static volatile uint8_t bufferIndex = 0;
+// Current state of pulse buffer
+static volatile PulseBufferState bufferState = BUF_NOT_READY;
+// Current state of capturing
+static volatile IRCaptureState captureState = WAIT_STATE;
+// Overflow counter - used to check timeout
+static volatile uint8_t ovfCounter = 0;
+
+/**
+ * Check whether repetition is disabled.
+ *
+ * @param command Command to check
+ * @return true if repetition is disabled for command
+ */
+static bool repDisabled(uint8_t command);
+
+/**
+ * Write data from pulse buffer to IRData and invIRData.
+ *
+ * @param IRData Structure which stores non-inverted data
+ * @param invIRData Structure which stores inverted data
+ */
+static void write_data(IR_data *IRData, IR_data *invIRData);
+
+
+
+/* ---------------------------------------------------------------------- */
+
+
+
+void IR_init(uint32_t bufferTimeout)
+{
+	#if defined(__AVR_ATtiny85__)
+	// Normal mode, prescaler 1024
+	TCCR0B |= _BV(CS02) | _BV(CS00);
 	
 	// External interrupt - any logical change
 	MCUCR |= _BV(ISC00);
@@ -77,13 +155,9 @@ void IR_init(uint16_t clearBufferTime)
 	// External interrupt for INT0 enabled
 	GIMSK |= _BV(INT0);
 	
-	#elif DEVICE == 1
-	// Normal mode
-	// Prescaler 1024
+	#elif defined(__AVR_ATtiny88__)
+	// Normal mode, prescaler 1024
 	TCCR0A |= _BV(CS02) | _BV(CS00);
-	
-	// Overflow interrupt for Timer/Counter0 enabled
-	TIMSK0 |= _BV(TOIE0);
 	
 	// External interrupt - any logical change
 	EICRA |= _BV(ISC00);
@@ -93,76 +167,86 @@ void IR_init(uint16_t clearBufferTime)
 	
 	#endif
 	
-	// Get the clearBufferTime time in ms (after this time, the buffer will be cleared)
-	if (clearBufferTime < 83)
+	// Initialize the pulse buffer
+	for (uint8_t i = 0; i < BUFFER_SIZE; i++)
 	{
-		clearBTime = 83;
+		pulseBuffer[i] = 0;
+	}
+	
+	// Calculate number of overflows to timeout
+	if (bufferTimeout < 132)
+	{
+		// 4 * 32.768 ms = 131.072 ms (32.768 ms is one period of overflow interrupt)
+		ovfsTimeout = 4;
 	}
 	else
 	{
-		clearBTime = clearBufferTime;
-	}
-	
-	// Initialize the buffer
-	for (uint8_t i = 0; i < BUFFER_SIZE; i++)
-	{
-		durationBuffer[i] = 0;
+		ovfsTimeout = (uint8_t) ((bufferTimeout / 32.768) + 1);
 	}
 }
 
-// Disables repetition of the entered command (while holding a button, your instructions related to the command are executed just once)
-void IR_disableRepetition(uint8_t command)
+/* ---------------------------------------------------------------------- */
+
+void IR_disable_repetition(uint8_t command)
 {
-	if(!isRepDisabled(command))
-		{
-		numOfcmds++;
+	if(!repDisabled(command))
+	{
+		/* Repetition is not enabled yet */
+
+		repDisCmdsCount++;
 		// Dynamic memory allocation
-		cmdsPtr = realloc(cmdsPtr, sizeof(*cmdsPtr) * numOfcmds);
-		if (cmdsPtr != NULL)
+		repDisCmds = realloc(repDisCmds, sizeof(*repDisCmds) * repDisCmdsCount);
+		
+		if (repDisCmds != NULL)
 		{
-			*(cmdsPtr + (numOfcmds-1)) = command;
+			// Add command to the array
+			*(repDisCmds + (repDisCmdsCount-1)) = command;
 		}
 	}
 }
 
-// Enables repetition of the entered command, which were disabled earlier
-void IR_enableRepetition(uint8_t command)
+/* ---------------------------------------------------------------------- */
+
+void IR_enable_repetition(uint8_t command)
 {
-	// Iterates through whole dynamically allocated memory
-	for (uint8_t i = 0; i < numOfcmds; i++)
+	// Iterate through whole dynamically allocated memory
+	for (uint8_t i = 0; i < repDisCmdsCount; i++)
 	{
-		if (*(cmdsPtr + i) == command)
+		if (*(repDisCmds + i) == command)
 		{
-			// Copy all commands
-			uint8_t *tempCmdsPtr = calloc(numOfcmds, sizeof(*cmdsPtr));
-			if (tempCmdsPtr != NULL)
+			/* Command to disable found */
+
+			// Create memory for temporary pointer where commands will be copied to
+			uint8_t *tempCmds = calloc(repDisCmdsCount, sizeof(*repDisCmds));
+			
+			if (tempCmds != NULL)
 			{
-				for (uint8_t j = 0; j < numOfcmds; j++)
+				// Copy commands to the temporary pointer
+				for (uint8_t j = 0; j < repDisCmdsCount; j++)
 				{
-					*(tempCmdsPtr + j) = *(cmdsPtr + j);
+					*(tempCmds + j) = *(repDisCmds + j);
 				}
 				
 				// Free commands memory
-				free(cmdsPtr);
+				free(repDisCmds);
 				
 				// Copy back all commands except the deleted one
-				numOfcmds--;
-				cmdsPtr = calloc(numOfcmds, sizeof(*cmdsPtr));
-				if (cmdsPtr != NULL)
+				repDisCmdsCount--;
+				repDisCmds = calloc(repDisCmdsCount, sizeof(*repDisCmds));
+				if (repDisCmds != NULL)
 				{
-					uint8_t k = 0;
-					for (uint8_t j = 0; j < numOfcmds + 1; j++)
+					for (uint8_t j = 0, k = 0; j < repDisCmdsCount + 1; j++)
 					{
-						if (*(tempCmdsPtr + j) != command)
+						if (*(tempCmds + j) != command)
 						{
-							*(cmdsPtr + k) = *(tempCmdsPtr + j);
+							*(repDisCmds + k) = *(tempCmds + j);
 							k++;
 						}
 					}
 				}
 				
 				// Free temporary commands memory
-				free(tempCmdsPtr);
+				free(tempCmds);
 			}
 			
 			break;
@@ -170,97 +254,208 @@ void IR_enableRepetition(uint8_t command)
 	}
 }
 
-// Returns true if receiving IR (initial pulses or repeat pulses)
-bool IR_available()
-{
-	uint8_t address = 0, invertedAddress = 0, command = 0, invertedCommand = 0;
-	static uint8_t lastCommand = 0;
-	static bool lastAvailable = false;
-	
-	// Clearing the buffer
-	if (clearBuffer)
-	{
-		for (uint8_t i = 0; i < BUFFER_SIZE; i++)
-		{
-			durationBuffer[i] = 0;
-		}
-		clearBuffer = false;
-	}
+/* ---------------------------------------------------------------------- */
 
-	// Checking the buffer
-	if (bufferReady)
-	{
-		available = true;
-			
-		for (uint8_t i = 0; i < 4; i++)
-		{
-			for (uint8_t j = i * 16 + 1; j < i * 16 + 16; j += 2)
-			{
-				switch (i)
-				{
-					case 0:
-					writeBit(i, j, &address);
-					break;
-						
-					case 1:
-					writeBit(i, j, &invertedAddress);
-					break;
-						
-					case 2:
-					writeBit(i, j, &command);
-					break;
-						
-					case 3:
-					writeBit(i, j, &invertedCommand);
-					break;
-				}
-			}
-		}
-			
-		// Checks whether invertedAddress is really inverted address
-		if ((address ^ invertedAddress) != 0xFF)
-		{
-			setSleepState();
-		}
-		// Checks whether invertedCommand is really inverted command
-		if ((command ^ invertedCommand) != 0xFF)
-		{
-			setSleepState();
-		}
-			
-		IR.address = address;	// Assigning address to structure's address member
-		IR.command = command;	// Assigning command to structure's command member
+bool IR_data_ready()
+{
+	bool dataReadyFlag = false;
+	
+	// New IR data
+	IR_data newIRData;
+	// New inverted IR data
+	IR_data newInvIRData;
 		
-		// Checks whether repetition is disabled
-		if (IR.command == lastCommand && lastAvailable == true && isRepDisabled(IR.command))
+	switch(bufferState)
+	{
+		case BUF_READY:
+		// Write data from the pulse buffer to new IR data structures
+		write_data(&newIRData, &newInvIRData);
+			
+		if ((newIRData.address ^ newInvIRData.address) != 0xFF || (newIRData.command ^ newInvIRData.command) != 0xFF)
 		{
-			bufferReady = false;
-			return false;
+			/* Address or command inversion error */
+
+			dataReadyFlag = false;
+			bufferState = BUF_NOT_READY;
+			break;
 		}
-		// Repetition is allowed
 		else
 		{
-			lastCommand = IR.command;
-			bufferReady = false;
+			/* Address and command inversion successful */
+
+			// Store IR data to the globally accessible variable
+			IR.address = newIRData.address;
+			IR.command = newIRData.command;
+			
+			dataReadyFlag = true;
+			bufferState = repDisabled(IR.command) ? BUF_NOT_READY : BUF_REPEAT;
 		}
-	}
-	// Checks whether repetition is disabled
-	else if (available && isRepDisabled(IR.command))
-	{
-		return false;
+		break;
+			
+		case BUF_REPEAT:
+		dataReadyFlag = true;
+		break;
+			
+		case BUF_NOT_READY:
+		dataReadyFlag = false;
+		break;
 	}
 	
-	lastAvailable = available;
-	return available;
+	return dataReadyFlag;
 }
 
-// Checks whether repetition is disabled
-static bool isRepDisabled(uint8_t command)
+/* ---------------------------------------------------------------------- */
+
+// External interrupt (IR signal capture)
+ISR(INT0_vect)
 {
-	// Iterates through whole dynamically allocated memory
-	for (uint8_t i = 0; i < numOfcmds; i++)
+	uint32_t capturedPulse = TICK * TCNT0;
+	// Pulse (HIGH) -> true, space (LOW) -> false
+	uint8_t pulseLevel = (IR_RCV_PIN_REG & _BV(IR_RCV_PIN)) >> IR_RCV_PIN;
+	// Bool to determine pulse buffer state in final pulse state
+	static bool repeatCode = false;
+		
+	switch (captureState)
 	{
-		if (*(cmdsPtr + i) == command)
+		// Waiting for next data
+		case WAIT_STATE:
+		if (!pulseLevel)
+		{
+			captureState = LEADING_PULSE_STATE;
+			#if defined(__AVR_ATtiny85__)
+			// Clear overflow interrupt flag
+			TIFR |= _BV(TOV0);
+			// Enable overflow interrupt for Timer/Counter0
+			TIMSK |= _BV(TOIE0);
+			#elif defined(__AVR_ATtiny88__)
+			// Clear overflow interrupt flag
+			TIFR0 |= _BV(TOV0);
+			// Enable overflow interrupt for Timer/Counter0
+			TIMSK0 |= _BV(TOIE0);
+			#endif
+		}
+		else
+		{
+			bufferState = BUF_NOT_READY;
+		}
+		break;
+			
+		// Leading pulse
+		case LEADING_PULSE_STATE:
+		if (pulseLevel && capturedPulse >= lowPulseThrs[LEADING_PULSE] && capturedPulse <= upPulseThrs[LEADING_PULSE])
+		{
+			captureState = LEADING_SPACE_STATE;
+		}
+		else
+		{
+			bufferState = BUF_NOT_READY;
+			captureState = WAIT_STATE;
+		}
+		break;
+			
+		// Initial space or repeat space
+		case LEADING_SPACE_STATE:
+		if (!pulseLevel && capturedPulse >= lowPulseThrs[INITIAL_SPACE] && capturedPulse <= upPulseThrs[INITIAL_SPACE])
+		{
+			captureState = DATA_STATE;
+			repeatCode = false;
+			bufferIndex = 0;
+		}
+		else if (!pulseLevel && capturedPulse >= lowPulseThrs[REPEAT_SPACE] && capturedPulse <= upPulseThrs[REPEAT_SPACE])
+		{
+			captureState = FINAL_PULSE_STATE;
+			repeatCode = true;
+		}
+		else
+		{
+			bufferState = BUF_NOT_READY;
+			captureState = WAIT_STATE;
+		}
+		break;
+			
+		// 8-bit address
+		case DATA_STATE:
+		// Short pulse or space
+		if (!pulseLevel && capturedPulse >= lowPulseThrs[LOGIC_SHORT] && capturedPulse <= upPulseThrs[LOGIC_SHORT])
+		{
+			pulseBuffer[bufferIndex++] = false;
+
+			if (bufferIndex >= BUFFER_SIZE)
+			{
+				captureState = FINAL_PULSE_STATE;
+			}
+		}
+		// Long space
+		else if (!pulseLevel && capturedPulse >= lowPulseThrs[LOGIC_LONG] && capturedPulse <= upPulseThrs[LOGIC_LONG])
+		{
+			pulseBuffer[bufferIndex++] = true;
+
+			if (bufferIndex >= BUFFER_SIZE)
+			{
+				captureState = FINAL_PULSE_STATE;
+			}
+		}
+		else if (!pulseLevel)
+		{
+			bufferState = BUF_NOT_READY;
+			captureState = WAIT_STATE;
+		}
+		break;
+			
+		// Final pulse
+		case FINAL_PULSE_STATE:
+		if (pulseLevel && capturedPulse >= lowPulseThrs[FINAL_PULSE] && capturedPulse <= upPulseThrs[FINAL_PULSE])
+		{
+			if (!repeatCode)
+			{
+				bufferState = BUF_READY;
+			}
+			
+			ovfCounter = 0;
+		}
+		else
+		{
+			bufferState = BUF_NOT_READY;
+		}
+		
+		captureState = WAIT_STATE;
+		break;
+	}
+		
+	TCNT0 = 0;
+}
+
+/* ---------------------------------------------------------------------- */
+
+// Overflow interrupt (period = 32.768 ms)
+ISR(TIMER0_OVF_vect)
+{
+	ovfCounter++;
+
+	if (ovfCounter >= ovfsTimeout)
+	{
+		#if defined(__AVR_ATtiny85__)
+		// Disable overflow interrupt for Timer/Counter0
+		TIMSK |= _BV(TOIE0);
+		#elif defined(__AVR_ATtiny88__)
+		// Disable overflow interrupt for Timer/Counter0
+		TIMSK0 &= ~_BV(TOIE0);		
+		#endif
+		
+		bufferState = BUF_NOT_READY;
+		captureState = WAIT_STATE;
+		ovfCounter = 0;
+	}
+}
+
+/* ---------------------------------------------------------------------- */
+
+static bool repDisabled(uint8_t command)
+{
+	// Iterate through whole dynamically allocated memory
+	for (uint8_t i = 0; i < repDisCmdsCount; i++)
+	{
+		if (*(repDisCmds + i) == command)
 		{
 			return true;
 		}
@@ -268,225 +463,35 @@ static bool isRepDisabled(uint8_t command)
 	return false;
 }
 
-static void writeBit(uint8_t i, uint8_t j, uint8_t *data)
-{
-	if (durationBuffer[j])
-	{
-		*data &= ~(1 << (((j-1)-i*16)/2));
-	}
-	else
-	{
-		*data |= (1 << (((j-1)-i*16)/2));
-	}
-}
+/* ---------------------------------------------------------------------- */
 
-static void setSleepState()
+static void write_data(IR_data *IRData, IR_data *invIRData)
 {
-	clearBuffer = true;
-	state = SLEEP_STATE;
-	level = true;
-	bufferIndex = 0;
-	available = false;
-}
-
-// External interrupt
-ISR(INT0_vect)
-{
-	if (!bufferReady)
+	const uint8_t dataCount = 4;
+	const uint8_t bufferFraction = BUFFER_SIZE / dataCount;
+	
+	uint8_t *allData[dataCount];
+	allData[0] = &IRData->address;
+	allData[1] = &invIRData->address;
+	allData[2] = &IRData->command;
+	allData[3] = &invIRData->command;
+	
+	// Write data
+	for (uint8_t dataI = 0; dataI < dataCount; dataI++)
 	{
-		switch (state)
+		// dataI =: 0 -> address, 1 -> inverted address, 2 -> command, 3 -> inverted command
+		for (uint8_t bufferI = 0; bufferI < bufferFraction; bufferI++)
 		{
-			case SLEEP_STATE:
-			state = LEADING_PULSE_STATE;
-			break;
-			
-			// Leading 9 ms pulse
-			case LEADING_PULSE_STATE:
-			if (TICK * TCNT0 >= LEADING_PULSE - timeRange && TICK * TCNT0 <= LEADING_PULSE + timeRange)
+			if (pulseBuffer[bufferI+(dataI*bufferFraction)])
 			{
-				state = LEADING_SPACE_STATE;
+				// Write 1
+				*allData[dataI] |= (1 << bufferI);
 			}
 			else
 			{
-				setSleepState();
+				// Write 0
+				*allData[dataI] &= ~(1 << bufferI);
 			}
-			break;
-			
-			// Initial 4.5 ms space or repeat 2.25 ms space
-			case LEADING_SPACE_STATE:
-			if (TICK * TCNT0 >= INITIAL_SPACE - timeRange && TICK * TCNT0 <= INITIAL_SPACE + timeRange)
-			{
-				state = ADDRESS_STATE;
-			}
-			else if (TICK * TCNT0 >= REPEAT_SPACE - timeRange && TICK * TCNT0 <= REPEAT_SPACE + timeRange)
-			{
-				state = FINAL_PULSE_STATE;
-			}
-			else
-			{
-				setSleepState();
-			}
-			break;
-			
-			// 8-bit address
-			case ADDRESS_STATE:
-			// Short pulse or space
-			if (TICK * TCNT0 >= LOGIC_SHORT - timeRange && TICK * TCNT0 <= LOGIC_SHORT + timeRange)
-			{
-				if (bufferIndex == BUFFER_SIZE / 4 - 1)
-				{
-					state = INVERTED_ADDRESS_STATE;
-				}
-				level = !level;
-				durationBuffer[bufferIndex++] = true;
-			}
-			// Long space
-			else if (TICK * TCNT0 >= LOGIC_LONG - timeRange && TICK * TCNT0 <= LOGIC_LONG + timeRange && !level)
-			{
-				if (bufferIndex == BUFFER_SIZE / 4 - 1)
-				{
-					state = INVERTED_ADDRESS_STATE;
-				}
-				level = !level;
-				durationBuffer[bufferIndex++] = false;
-			}
-			else
-			{
-				setSleepState();
-			}
-			break;
-			
-			// 8-bit inverted address
-			case INVERTED_ADDRESS_STATE:
-			// Short pulse or space
-			if (TICK * TCNT0 >= LOGIC_SHORT - timeRange && TICK * TCNT0 <= LOGIC_SHORT + timeRange)
-			{
-				if (bufferIndex == BUFFER_SIZE / 2 - 1)
-				{
-					state = COMMAND_STATE;
-				}
-				level = !level;
-				durationBuffer[bufferIndex++] = true;
-			}
-			// Long space
-			else if (TICK * TCNT0 >= LOGIC_LONG - timeRange && TICK * TCNT0 <= LOGIC_LONG + timeRange && !level)
-			{
-				if (bufferIndex == BUFFER_SIZE / 2 - 1)
-				{
-					state = COMMAND_STATE;
-				}
-				level = !level;
-				durationBuffer[bufferIndex++] = false;
-			}
-			else
-			{
-				setSleepState();
-			}
-			break;
-			
-			// 8-bit command
-			case COMMAND_STATE:
-			// Short pulse or space
-			if (TICK * TCNT0 >= LOGIC_SHORT - timeRange && TICK * TCNT0 <= LOGIC_SHORT + timeRange)
-			{
-				if (bufferIndex == (3 * BUFFER_SIZE) / 4 - 1)
-				{
-					state = INVERTED_COMMAND_STATE;
-				}
-				level = !level;
-				durationBuffer[bufferIndex++] = true;
-			}
-			// Long space
-			else if (TICK * TCNT0 >= LOGIC_LONG - timeRange && TICK * TCNT0 <= LOGIC_LONG + timeRange && !level)
-			{
-				if (bufferIndex == (3 * BUFFER_SIZE) / 4 - 1)
-				{
-					state = INVERTED_COMMAND_STATE;
-				}
-				level = !level;
-				durationBuffer[bufferIndex++] = false;
-			}
-			else
-			{
-				setSleepState();
-			}
-			break;
-			
-			// 8-bit inverted command
-			case INVERTED_COMMAND_STATE:
-			// Short pulse or space
-			if (TICK * TCNT0 >= LOGIC_SHORT - timeRange && TICK * TCNT0 <= LOGIC_SHORT + timeRange)
-			{
-				if (bufferIndex == BUFFER_SIZE - 1)
-				{
-					state = FINAL_PULSE_STATE;
-				}
-				level = !level;
-				durationBuffer[bufferIndex++] = true;
-			}
-			// Long space
-			else if (TICK * TCNT0 >= LOGIC_LONG - timeRange && TICK * TCNT0 <= LOGIC_LONG + timeRange && !level)
-			{
-				if (bufferIndex == BUFFER_SIZE - 1)
-				{
-					state = FINAL_PULSE_STATE;
-				}
-				level = !level;
-				durationBuffer[bufferIndex++] = false;
-			}
-			else
-			{
-				setSleepState();
-			}
-			break;
-			
-			// Final 562.5 탎 pulse
-			case FINAL_PULSE_STATE:
-			if (TICK * TCNT0 >= FINAL_PULSE - timeRange && TICK * TCNT0 <= FINAL_PULSE + timeRange)
-			{
-				clearBuffer = false;
-				state = WAIT_STATE;
-				ovfCounter = 1;
-				level = true;
-				bufferIndex = 0;
-				bufferReady = true;
-			}
-			else
-			{
-				setSleepState();
-			}
-			break;
-			
-			// Waiting after final pulse
-			case WAIT_STATE:
-			state = LEADING_PULSE_STATE;
-			break;
 		}
-	}
-	
-	TCNT0 = 0;
-}
-
-// Overflow interrupt
-ISR(TIMER0_OVF_vect)
-{
-	// SLEEP_STATE begins after NUM_OF_OVFS overflow interrupts
-	if (ovfCounter >= NUM_OF_OVFS)
-	{
-		state = SLEEP_STATE;
-		level = true;
-		bufferIndex = 0;
-		available = false;
-	}
-	
-	// Clearing buffer is allowed after NUM_OF_CLEAR_BUFFER_OVFS overflow interrupts
-	if (ovfCounter >= NUM_OF_CLEAR_BUFFER_OVFS(clearBTime))
-	{
-		ovfCounter = 1;
-		clearBuffer = true;
-	}
-	else
-	{
-		ovfCounter++;
 	}
 }

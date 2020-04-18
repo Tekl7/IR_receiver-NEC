@@ -12,16 +12,21 @@
  * CPU clock is 8 MHz.
  *
  * Connect output pin of IR receiver to PB2->ATtiny85 / PD2->ATtiny88 (pin 7/4).
- * Execute IR_init(uint16_t clearBufferTime) function to set registers, interrupts and clearBufferTime (after this time, durationBuffer will be cleared).
- * The clearBufferTime is useful, when some parts of running program cause delay. Its value should be set the same as the duration of the delay.
- * If nothing causes delay, just write 0.
- * Repetition for certain commands can be disabled using IR_disableRepetition(uint8_t command).
- * For each command one IR_disableRepetition(uint8_t command) execution is needed.
- * So while holding a button, your instructions related to the command are executed just once (IR_available() returns false).
- * Disabled repetition can be enabled using IR_enableRepetition(uint8_t command) again.
- * Then just check IR_available() function in loop.
- * If IR_available() returns true, IR signal has been checked succesfully and then IR data (address and command) are available.
+ *
+ * Execute IR_init(uint32_t bufferTimeout) function to initialize IR receiving and set buffer timeout.
+ * When timeout occurs, IR data won't be accessible. Before timeout the last received IR data are stored.
+ * Set buffer timeout according to delay which is caused by main program. For zero delay write IR_init(0).
+ * Actually buffer timeout has some min. value which is necessary, because of time between individual IR codes.
+ *
+ * Repetition for certain commands can be disabled using IR_disable_repetition(uint8_t command).
+ * For each command one IR_disable_repetition(uint8_t command) execution is needed.
+ * So while holding a button, your instructions related to the command are executed just once (IR_data_ready() returns false).
+ * Disabled repetition can be enabled using IR_enable_repetition(uint8_t command) again.
+ *
+ * Then just check IR_data_ready() function in loop.
+ * If IR_data_ready() returns true, IR signal has been checked succesfully and then IR data (address and command) are available.
  * Access to IR data is through IR_data structure named IR (IR.address for address, IR.command for command).
+ *
  * Make sure to execute sei() function to enable global interrupts.
  */ 
 
@@ -35,11 +40,6 @@
 
 #include <stdbool.h>
 
-// Choose a number and assign it to DEVICE macro to select the demanded device.
-// ATtiny85 -> 0
-// ATtiny88 -> 1
-#define DEVICE 0
-
 // Structure for address and command
 typedef struct
 {
@@ -47,11 +47,42 @@ typedef struct
 	uint8_t command;
 } IR_data;
 
+// If IR_data_ready() function return true, then this variable contains the data (address and command).
 extern IR_data IR;
 
-void IR_init(uint16_t clearBufferTime);
-void IR_disableRepetition(uint8_t command);
-void IR_enableRepetition(uint8_t command);
-bool IR_available();
+/**
+ * Initialize IR receiving and set buffer timeout.
+ *
+ * @param bufferTimeout When timeout occurs, IR data won't be accessible.
+ *						Before timeout the last received IR data are stored.
+ *						Set according to delay which is caused by main program.
+ *						For zero delay write IR_init(0).
+ *						Actually buffer timeout has some min. value which is necessary,
+ *						because of time between individual IR codes.
+ */
+void IR_init(uint32_t bufferTimeout);
+
+/**
+ * Disable repetition of a command.
+ * While holding a button, instructions related to the command are executed just once.
+ *
+ * @param command Command whose repetition disable
+ */
+void IR_disable_repetition(uint8_t command);
+
+/**
+ * Enable repetition of a command, which was disabled earlier.
+ *
+ * @param command Command whose repetition enable
+ */
+void IR_enable_repetition(uint8_t command);
+
+/**
+ * Continuously check this function in loop to get to know whether IR data are ready.
+ * If IR data are ready, then IR structure variable contains the data (address and command).
+ *
+ * @return true if IR data are ready to be read
+ */
+bool IR_data_ready();
 
 #endif /* IR_NEC_H_ */
