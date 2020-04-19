@@ -29,6 +29,13 @@
 // Number of elements in the pulseBuffer
 #define BUFFER_SIZE 32
 
+/*
+	Pulse tolerance multiplier - used to calculate pulse thresholds
+	Use in interval from 1 to 2
+	The greater the multiplier, the greater the tolerance
+*/
+#define PULSE_TOLERANCE_MULT	1.3
+
 enum PulseType
 {
 	LEADING_PULSE = 0,
@@ -39,6 +46,17 @@ enum PulseType
 	LOGIC_LONG,
 	
 	PULSE_COUNT
+};
+
+// In µs
+enum PulseDuration
+{
+	LEADING_PULSE_DUR = 9500,
+	INITIAL_SPACE_DUR = 4500,
+	REPEAT_SPACE_DUR = 2250,
+	FINAL_PULSE_DUR = 540,
+	LOGIC_SHORT_DUR = 540,
+	LOGIC_LONG_DUR = 1688
 };
 
 typedef enum
@@ -64,42 +82,26 @@ typedef enum
 	BUF_NOT_READY
 } PulseBufferState;
 
-/*
-	// Pulse tolerance multiplier - used to calculate pulse thresholds
-	#define PULSE_TOLERANCE_MULT	1.3
-
-	// In µs
-	enum PulseDuration
-	{
-		LEADING_PULSE_DUR = 9500,
-		INITIAL_SPACE_DUR = 4500,
-		REPEAT_SPACE_DUR = 2250,
-		FINAL_PULSE_DUR = 540,
-		LOGIC_SHORT_DUR = 540,
-		LOGIC_LONG_DUR = 1688
-	};
-*/
-
 // Lower thresholds of pulse duration
 static /* const */ uint16_t lowPulseThrs[PULSE_COUNT] =
 {
-	6650,	// LEADING_PULSE_DUR * (2 - PULSE_TOLERANCE_MULT)
-	3150,	// INITIAL_SPACE_DUR * (2 - PULSE_TOLERANCE_MULT)
-	1575,	// REPEAT_SPACE_DUR * (2 - PULSE_TOLERANCE_MULT)
-	378,	// FINAL_PULSE_DUR * (2 - PULSE_TOLERANCE_MULT)
-	378,	// LOGIC_SHORT_DUR * (2 - PULSE_TOLERANCE_MULT)
-	1181	// LOGIC_LONG_DUR * (2 - PULSE_TOLERANCE_MULT)
+	LEADING_PULSE_DUR * (2 - PULSE_TOLERANCE_MULT),
+	INITIAL_SPACE_DUR * (2 - PULSE_TOLERANCE_MULT),
+	REPEAT_SPACE_DUR * (2 - PULSE_TOLERANCE_MULT),
+	FINAL_PULSE_DUR * (2 - PULSE_TOLERANCE_MULT),
+	LOGIC_SHORT_DUR * (2 - PULSE_TOLERANCE_MULT),
+	LOGIC_LONG_DUR * (2 - PULSE_TOLERANCE_MULT)
 };
 
 // Upper thresholds of pulse duration
 static /* const */ uint16_t upPulseThrs[PULSE_COUNT] =
 {
-	12350,	// LEADING_PULSE_DUR * PULSE_TOLERANCE_MULT
-	5850,	// INITIAL_SPACE_DUR * PULSE_TOLERANCE_MULT
-	2925,	// REPEAT_SPACE_DUR * PULSE_TOLERANCE_MULT
-	702,	// FINAL_PULSE_DUR * PULSE_TOLERANCE_MULT
-	702,	// LOGIC_SHORT_DUR * PULSE_TOLERANCE_MULT
-	2194	// LOGIC_LONG_DUR * PULSE_TOLERANCE_MULT
+	LEADING_PULSE_DUR * PULSE_TOLERANCE_MULT,
+	INITIAL_SPACE_DUR * PULSE_TOLERANCE_MULT,
+	REPEAT_SPACE_DUR * PULSE_TOLERANCE_MULT,
+	FINAL_PULSE_DUR * PULSE_TOLERANCE_MULT,
+	LOGIC_SHORT_DUR * PULSE_TOLERANCE_MULT,
+	LOGIC_LONG_DUR * PULSE_TOLERANCE_MULT
 };
 
 // Main variable that stores IR data (address and command)
